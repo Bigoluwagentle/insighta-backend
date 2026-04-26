@@ -19,9 +19,10 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(cookieParser());
 app.use(requestLogger);
-app.use(csrfProtection);
 
 app.use("/auth", authRoutes);
+
+app.use(csrfProtection);
 app.use("/api/profiles", profileRoutes);
 
 app.use((req, res) => {
