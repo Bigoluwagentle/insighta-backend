@@ -1,45 +1,65 @@
 const express = require("express");
-const router = express.Router();
-const https = require("https");
-const { getDb } = require("../db");
-const { uuidv7 } = require("../utils/uuid");
+const router  = express.Router();
+const https   = require("https");
+const { getDb }    = require("../db");
+const { uuidv7 }   = require("../utils/uuid");
 const { issueAccessToken, issueRefreshToken, rotateRefreshToken, revokeRefreshToken } = require("../utils/tokens");
 const { generateCsrfToken } = require("../middleware/csrf");
-const { authLimiter } = require("../middleware/rateLimit");
-const { requireAuth } = require("../middleware/auth");
+const { authLimiter }       = require("../middleware/rateLimit");
+const { requireAuth }       = require("../middleware/auth");
 
 const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const FRONTEND_URL         = process.env.FRONTEND_URL || "http://localhost:3001";
 
-const pendingVerifiers = new Map();
+const pendingStates = new Map();
 
 router.get("/github", authLimiter, (req, res) => {
   const { state, code_challenge, code_challenge_method, redirect_uri } = req.query;
-  if (state && code_challenge) {
-    pendingVerifiers.set(state, { code_challenge, code_challenge_method, redirect_uri });
-  }
+
+  const stateKey = state || require("crypto").randomBytes(16).toString("hex");
+
+  pendingStates.set(stateKey, {
+    code_challenge,
+    code_challenge_method,
+    redirect_uri: redirect_uri || null,
+  });
+
+  setTimeout(() => pendingStates.delete(stateKey), 10 * 60 * 1000);
+
   const params = new URLSearchParams({
     client_id: GITHUB_CLIENT_ID,
     scope: "read:user user:email",
-    ...(state && { state }),
+    state: stateKey,
   });
+
   res.redirect(`https://github.com/login/oauth/authorize?${params}`);
 });
 
 router.get("/github/callback", authLimiter, async (req, res) => {
   const { code, state } = req.query;
-  if (!code) return res.status(400).json({ status: "error", message: "Missing authorization code" });
 
-  const pkceData = state ? pendingVerifiers.get(state) : null;
-  if (pkceData) pendingVerifiers.delete(state);
+  if (!code) {
+    return res.status(400).json({ status: "error", message: "Missing authorization code" });
+  }
+
+  const stateData = state ? pendingStates.get(state) : null;
+  if (state) pendingStates.delete(state);
+
+  const redirectUri = stateData && stateData.redirect_uri;
 
   try {
     const githubToken = await exchangeCodeForToken(code);
-    if (!githubToken) return res.status(502).json({ status: "error", message: "Failed to exchange code with GitHub" });
+    if (!githubToken) {
+      if (redirectUri) return res.redirect(`${redirectUri}?error=github_exchange_failed`);
+      return res.status(502).json({ status: "error", message: "Failed to exchange code with GitHub" });
+    }
 
     const githubUser = await getGithubUser(githubToken);
-    if (!githubUser) return res.status(502).json({ status: "error", message: "Failed to fetch GitHub user" });
+    if (!githubUser) {
+      if (redirectUri) return res.redirect(`${redirectUri}?error=github_user_failed`);
+      return res.status(502).json({ status: "error", message: "Failed to fetch GitHub user" });
+    }
 
     const db  = getDb();
     const now = new Date().toISOString();
@@ -57,16 +77,26 @@ router.get("/github/callback", authLimiter, async (req, res) => {
       user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
     }
 
-    if (!user.is_active) return res.status(403).json({ status: "error", message: "Account is disabled" });
+    if (!user.is_active) {
+      if (redirectUri) return res.redirect(`${redirectUri}?error=account_disabled`);
+      return res.status(403).json({ status: "error", message: "Account is disabled" });
+    }
 
     const accessToken  = issueAccessToken(user);
     const refreshToken = issueRefreshToken(user.id);
 
-    if (pkceData && pkceData.redirect_uri) {
-      const callbackParams = new URLSearchParams({
+    if (redirectUri && redirectUri.includes("localhost")) {
+      const params = new URLSearchParams({
         access_token: accessToken, refresh_token: refreshToken, username: user.username,
       });
-      return res.redirect(`${pkceData.redirect_uri}?${callbackParams}`);
+      return res.redirect(`${redirectUri}?${params}`);
+    }
+
+    if (redirectUri) {
+      const params = new URLSearchParams({
+        access_token: accessToken, refresh_token: refreshToken,
+      });
+      return res.redirect(`${redirectUri}?${params}`);
     }
 
     const csrfToken = generateCsrfToken();
@@ -75,8 +105,10 @@ router.get("/github/callback", authLimiter, async (req, res) => {
     res.cookie("refresh_token", refreshToken, { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
     res.cookie("csrf_token",    csrfToken,    { httpOnly: false, secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
     return res.redirect(`${FRONTEND_URL}/dashboard`);
+
   } catch (err) {
     console.error("OAuth callback error:", err);
+    if (redirectUri) return res.redirect(`${redirectUri}?error=auth_failed`);
     return res.status(500).json({ status: "error", message: "Authentication failed" });
   }
 });
@@ -91,7 +123,7 @@ router.post("/refresh", authLimiter, (req, res) => {
   const { accessToken, refreshToken } = result;
 
   if (req.cookies && req.cookies.refresh_token) {
-    const isProd = process.env.NODE_ENV === "production";
+    const isProd    = process.env.NODE_ENV === "production";
     const csrfToken = generateCsrfToken();
     res.cookie("access_token",  accessToken,  { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 3 * 60 * 1000 });
     res.cookie("refresh_token", refreshToken, { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
@@ -119,7 +151,7 @@ function httpsPost(options, body) {
   return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
       let data = "";
-      res.on("data", (chunk) => (data += chunk));
+      res.on("data", (c) => (data += c));
       res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(data); } });
     });
     req.on("error", reject);
@@ -132,7 +164,7 @@ function httpsGet(url, token) {
   return new Promise((resolve, reject) => {
     https.get(url, { headers: { Authorization: `Bearer ${token}`, "User-Agent": "insighta-labs" } }, (res) => {
       let data = "";
-      res.on("data", (chunk) => (data += chunk));
+      res.on("data", (c) => (data += c));
       res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
     }).on("error", reject);
   });
