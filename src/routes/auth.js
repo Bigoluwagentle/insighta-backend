@@ -183,4 +183,18 @@ async function getGithubUser(token) {
   return await httpsGet("https://api.github.com/user", token);
 }
 
+router.post("/setup-admin", async (req, res) => {
+  const { secret, username } = req.body;
+  if (secret !== process.env.JWT_SECRET) {
+    return res.status(403).json({ status: "error", message: "Forbidden" });
+  }
+  const db = getDb();
+  const adminExists = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
+  if (adminExists) {
+    return res.status(400).json({ status: "error", message: "Admin already exists" });
+  }
+  db.prepare("UPDATE users SET role = 'admin' WHERE username = ?").run(username);
+  return res.status(200).json({ status: "success", message: `${username} is now admin` });
+});
+
 module.exports = router;
