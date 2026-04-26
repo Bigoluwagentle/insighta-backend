@@ -3,4 +3,3 @@ node_modules/
 *.db
 *.db-shm
 *.db-wal
-profiles.json
