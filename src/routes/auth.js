@@ -71,9 +71,11 @@ router.get("/github/callback", authLimiter, async (req, res) => {
       user = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
     } else {
       const id = uuidv7();
+      const anyAdmin = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
+      const role = anyAdmin ? "analyst" : "admin";
       db.prepare(`INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at)
-        VALUES (?, ?, ?, ?, ?, 'analyst', 1, ?, ?)`)
-        .run(id, String(githubUser.id), githubUser.login, githubUser.email || null, githubUser.avatar_url, now, now);
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`)
+        .run(id, String(githubUser.id), githubUser.login, githubUser.email || null, githubUser.avatar_url, role, now, now);
       user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
     }
 
