@@ -141,3 +141,5 @@ DB_PATH=./insighta.db
 
 ### Seed database
 Place `profiles.json` in the project root. It seeds automatically on startup.
+
+<!-- Stage 3 complete -->
