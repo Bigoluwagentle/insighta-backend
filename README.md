@@ -141,3 +141,12 @@ DB_PATH=./insighta.db
 
 ### Seed database
 Place `profiles.json` in the project root. It seeds automatically on startup.
+
+## Repositories
+- Backend: https://github.com/bigoluwagentle/insighta-backend
+- CLI: https://github.com/bigoluwagentle/insighta-cli  
+- Portal: https://github.com/bigoluwagentle/insighta-portal
+
+## Live URLs
+- Backend API: https://insighta-backend-production.up.railway.app
+- Web Portal: https://insighta-portal-production.up.railway.app
