@@ -6,6 +6,8 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
+  skipFailedRequests: false,
+  keyGenerator: (req) => req.ip,
   handler: (req, res) => {
     res.status(429).json({ status: "error", message: "Too many requests, please try again later" });
   },
@@ -14,10 +16,11 @@ const authLimiter = rateLimit({
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
-  keyGenerator: (req) => (req.user ? req.user.id : req.ip),
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
+  skipFailedRequests: false,
+  keyGenerator: (req) => (req.user ? req.user.id : req.ip),
   handler: (req, res) => {
     res.status(429).json({ status: "error", message: "Too many requests, please try again later" });
   },
