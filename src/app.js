@@ -1,9 +1,10 @@
-const express = require("express");
+const express      = require("express");
 const cookieParser = require("cookie-parser");
 const { requestLogger } = require("./middleware/rateLimit");
 const { csrfProtection } = require("./middleware/csrf");
 const authRoutes    = require("./routes/auth");
 const profileRoutes = require("./routes/profiles");
+const { requireAuth } = require("./middleware/auth");
 
 const app = express();
 
@@ -21,6 +22,11 @@ app.use(cookieParser());
 app.use(requestLogger);
 
 app.use("/auth", authRoutes);
+
+app.get("/api/users/me", requireAuth, (req, res) => {
+  const { id, username, email, avatar_url, role, created_at, last_login_at } = req.user;
+  return res.status(200).json({ status: "success", data: { id, username, email, avatar_url, role, created_at, last_login_at } });
+});
 
 app.use(csrfProtection);
 app.use("/api/profiles", profileRoutes);
