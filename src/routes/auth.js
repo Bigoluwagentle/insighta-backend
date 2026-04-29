@@ -6,21 +6,17 @@ const { getDb }    = require("../db");
 const { uuidv7 }   = require("../utils/uuid");
 const { issueAccessToken, issueRefreshToken, rotateRefreshToken, revokeRefreshToken } = require("../utils/tokens");
 const { generateCsrfToken } = require("../middleware/csrf");
-const { authLimiter }       = require("../middleware/rateLimit");
 const { requireAuth }       = require("../middleware/auth");
 
 const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const FRONTEND_URL         = process.env.FRONTEND_URL || "http://localhost:3001";
 
-// In-memory store for PKCE state + verifier
 const pendingStates = new Map();
 
-// GET /auth/github
-router.get("/github", authLimiter, (req, res) => {
+router.get("/github", (req, res) => {
   const { code_challenge, code_challenge_method, redirect_uri } = req.query;
 
-  // Always generate a fresh state server-side
   const state = crypto.randomBytes(16).toString("hex");
 
   pendingStates.set(state, {
@@ -30,7 +26,6 @@ router.get("/github", authLimiter, (req, res) => {
     created_at:            Date.now(),
   });
 
-  // Clean up after 10 minutes
   setTimeout(() => pendingStates.delete(state), 10 * 60 * 1000);
 
   const params = new URLSearchParams({
@@ -42,48 +37,35 @@ router.get("/github", authLimiter, (req, res) => {
   res.redirect(`https://github.com/login/oauth/authorize?${params}`);
 });
 
-// GET /auth/github/callback
-router.get("/github/callback", authLimiter, async (req, res) => {
+router.get("/github/callback", async (req, res) => {
   const { code, state, code_verifier } = req.query;
 
-  // Must have code
   if (!code) {
     return res.status(400).json({ status: "error", message: "Missing authorization code" });
   }
 
-  // Must have state
   if (!state) {
     return res.status(400).json({ status: "error", message: "Missing state parameter" });
   }
 
-  // State must exist in our store
   const stateData = pendingStates.get(state);
   if (!stateData) {
     return res.status(400).json({ status: "error", message: "Invalid or expired state" });
   }
   pendingStates.delete(state);
 
-  // Validate PKCE if code_challenge was provided
   if (stateData.code_challenge) {
     if (!code_verifier) {
       return res.status(400).json({ status: "error", message: "Missing code_verifier" });
     }
-
-    // Verify code_verifier matches code_challenge
     const method = stateData.code_challenge_method || "S256";
-    let computedChallenge;
-
+    let computed;
     if (method === "S256") {
-      computedChallenge = crypto
-        .createHash("sha256")
-        .update(code_verifier)
-        .digest("base64url");
+      computed = crypto.createHash("sha256").update(code_verifier).digest("base64url");
     } else {
-      // plain
-      computedChallenge = code_verifier;
+      computed = code_verifier;
     }
-
-    if (computedChallenge !== stateData.code_challenge) {
+    if (computed !== stateData.code_challenge) {
       return res.status(400).json({ status: "error", message: "Invalid code_verifier" });
     }
   }
@@ -112,7 +94,7 @@ router.get("/github/callback", authLimiter, async (req, res) => {
         .run(githubUser.login, githubUser.email || null, githubUser.avatar_url, now, user.id);
       user = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
     } else {
-      const id = uuidv7();
+      const id       = uuidv7();
       const anyAdmin = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
       const role     = anyAdmin ? "analyst" : "admin";
       db.prepare(`INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at)
@@ -129,7 +111,6 @@ router.get("/github/callback", authLimiter, async (req, res) => {
     const accessToken  = issueAccessToken(user);
     const refreshToken = issueRefreshToken(user.id);
 
-    // CLI flow — redirect_uri is localhost
     if (redirectUri && redirectUri.includes("localhost")) {
       const params = new URLSearchParams({
         access_token:  accessToken,
@@ -139,7 +120,6 @@ router.get("/github/callback", authLimiter, async (req, res) => {
       return res.redirect(`${redirectUri}?${params}`);
     }
 
-    // Web portal flow — redirect_uri is portal /auth/callback
     if (redirectUri) {
       const params = new URLSearchParams({
         access_token:  accessToken,
@@ -148,7 +128,6 @@ router.get("/github/callback", authLimiter, async (req, res) => {
       return res.redirect(`${redirectUri}?${params}`);
     }
 
-    // Direct browser flow — HTTP-only cookies
     const csrfToken = generateCsrfToken();
     const isProd    = process.env.NODE_ENV === "production";
     res.cookie("access_token",  accessToken,  { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 3 * 60 * 1000 });
@@ -163,8 +142,7 @@ router.get("/github/callback", authLimiter, async (req, res) => {
   }
 });
 
-// POST /auth/refresh
-router.post("/refresh", authLimiter, (req, res) => {
+router.post("/refresh", (req, res) => {
   const token = req.body.refresh_token || (req.cookies && req.cookies.refresh_token);
   if (!token) return res.status(400).json({ status: "error", message: "Refresh token required" });
 
@@ -184,7 +162,6 @@ router.post("/refresh", authLimiter, (req, res) => {
   return res.status(200).json({ status: "success", access_token: accessToken, refresh_token: refreshToken });
 });
 
-// POST /auth/logout
 router.post("/logout", requireAuth, (req, res) => {
   const token = req.body.refresh_token || (req.cookies && req.cookies.refresh_token);
   if (token) revokeRefreshToken(token);
@@ -194,19 +171,11 @@ router.post("/logout", requireAuth, (req, res) => {
   return res.status(200).json({ status: "success", message: "Logged out successfully" });
 });
 
-// GET /auth/me
 router.get("/me", requireAuth, (req, res) => {
   const { id, username, email, avatar_url, role, created_at, last_login_at } = req.user;
   return res.status(200).json({ status: "success", data: { id, username, email, avatar_url, role, created_at, last_login_at } });
 });
 
-// GET /api/users/me — alias the grader checks
-router.get("/users/me", requireAuth, (req, res) => {
-  const { id, username, email, avatar_url, role, created_at, last_login_at } = req.user;
-  return res.status(200).json({ status: "success", data: { id, username, email, avatar_url, role, created_at, last_login_at } });
-});
-
-// POST /auth/setup-admin — one time setup
 router.post("/setup-admin", (req, res) => {
   const { secret, username } = req.body;
   if (secret !== process.env.JWT_SECRET) {
@@ -217,7 +186,6 @@ router.post("/setup-admin", (req, res) => {
   return res.status(200).json({ status: "success", message: `${username} is now admin` });
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function httpsPost(options, body) {
   return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
@@ -233,7 +201,9 @@ function httpsPost(options, body) {
 
 function httpsGet(url, token) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { Authorization: `Bearer ${token}`, "User-Agent": "insighta-labs" } }, (res) => {
+    https.get(url, {
+      headers: { Authorization: `Bearer ${token}`, "User-Agent": "insighta-labs" },
+    }, (res) => {
       let data = "";
       res.on("data", (c) => (data += c));
       res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
@@ -242,10 +212,20 @@ function httpsGet(url, token) {
 }
 
 async function exchangeCodeForToken(code) {
-  const body = JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code });
+  const body = JSON.stringify({
+    client_id:     GITHUB_CLIENT_ID,
+    client_secret: GITHUB_CLIENT_SECRET,
+    code,
+  });
   const data = await httpsPost({
-    hostname: "github.com", path: "/login/oauth/access_token", method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", "Content-Length": Buffer.byteLength(body) },
+    hostname: "github.com",
+    path:     "/login/oauth/access_token",
+    method:   "POST",
+    headers:  {
+      "Content-Type":   "application/json",
+      Accept:           "application/json",
+      "Content-Length": Buffer.byteLength(body),
+    },
   }, body);
   return data.access_token || null;
 }

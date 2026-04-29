@@ -1,5 +1,6 @@
 const express      = require("express");
 const cookieParser = require("cookie-parser");
+const rateLimit    = require("express-rate-limit");
 const { requestLogger } = require("./middleware/rateLimit");
 const { csrfProtection } = require("./middleware/csrf");
 const authRoutes    = require("./routes/auth");
@@ -7,6 +8,8 @@ const profileRoutes = require("./routes/profiles");
 const { requireAuth } = require("./middleware/auth");
 
 const app = express();
+
+app.set("trust proxy", 1);
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", process.env.FRONTEND_URL || "*");
@@ -21,6 +24,20 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(requestLogger);
 
+const authRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: false,
+  skipFailedRequests: false,
+  keyGenerator: (req) => req.ip || req.connection.remoteAddress,
+  handler: (req, res) => {
+    return res.status(429).json({ status: "error", message: "Too many requests, please try again later" });
+  },
+});
+
+app.use("/auth", authRateLimiter);
 app.use("/auth", authRoutes);
 
 app.get("/api/users/me", requireAuth, (req, res) => {
