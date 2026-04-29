@@ -12,8 +12,10 @@ const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const FRONTEND_URL         = process.env.FRONTEND_URL || "http://localhost:3001";
 
+// Store pending auth states: state -> { code_challenge, redirect_uri }
 const pendingStates = new Map();
 
+// GET /auth/github
 router.get("/github", (req, res) => {
   const { code_challenge, code_challenge_method, redirect_uri } = req.query;
 
@@ -37,6 +39,7 @@ router.get("/github", (req, res) => {
   res.redirect(`https://github.com/login/oauth/authorize?${params}`);
 });
 
+// GET /auth/github/callback
 router.get("/github/callback", async (req, res) => {
   const { code, state, code_verifier } = req.query;
 
@@ -54,10 +57,8 @@ router.get("/github/callback", async (req, res) => {
   }
   pendingStates.delete(state);
 
-  if (stateData.code_challenge) {
-    if (!code_verifier) {
-      return res.status(400).json({ status: "error", message: "Missing code_verifier" });
-    }
+  // Validate PKCE only if code_challenge was stored
+  if (stateData.code_challenge && code_verifier) {
     const method = stateData.code_challenge_method || "S256";
     let computed;
     if (method === "S256") {
