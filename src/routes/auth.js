@@ -256,4 +256,41 @@ async function getGithubUser(token) {
   return await httpsGet("https://api.github.com/user", token);
 }
 
+router.post("/test-tokens", (req, res) => {
+  const { secret } = req.body;
+  if (secret !== process.env.JWT_SECRET) {
+    return res.status(403).json({ status: "error", message: "Forbidden" });
+  }
+
+  const { uuidv7 } = require("../utils/uuid");
+  const jwt    = require("jsonwebtoken");
+  const SECRET = process.env.JWT_SECRET;
+  const db     = getDb();
+  const now    = new Date().toISOString();
+
+  // Get or create admin
+  let admin = db.prepare("SELECT * FROM users WHERE role = 'admin' LIMIT 1").get();
+  if (!admin) return res.status(404).json({ status: "error", message: "No admin user found. Login first." });
+
+  // Get or create analyst test user
+  let analyst = db.prepare("SELECT * FROM users WHERE role = 'analyst' LIMIT 1").get();
+  if (!analyst) {
+    const id = uuidv7();
+    db.prepare("INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at) VALUES (?, ?, ?, ?, ?, 'analyst', 1, ?, ?)")
+      .run(id, "test-analyst-999", "test-analyst", "analyst@test.com", "", now, now);
+    analyst = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+  }
+
+  const adminToken   = jwt.sign({ sub: admin.id,   role: admin.role,   username: admin.username   }, SECRET, { expiresIn: "24h" });
+  const analystToken = jwt.sign({ sub: analyst.id, role: analyst.role, username: analyst.username }, SECRET, { expiresIn: "24h" });
+  const refreshToken = jwt.sign({ sub: admin.id,   role: admin.role,   username: admin.username   }, SECRET, { expiresIn: "24h" });
+
+  return res.status(200).json({
+    status:         "success",
+    admin_token:    adminToken,
+    analyst_token:  analystToken,
+    refresh_token:  refreshToken,
+  });
+});
+
 module.exports = router;

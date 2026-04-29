@@ -31,6 +31,7 @@ const authRateLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   skipFailedRequests: false,
+  skip: () => false,
   keyGenerator: (req) => req.ip || req.connection.remoteAddress,
   handler: (req, res) => {
     return res.status(429).json({ status: "error", message: "Too many requests, please try again later" });
