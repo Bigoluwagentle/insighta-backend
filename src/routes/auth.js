@@ -12,133 +12,92 @@ const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const FRONTEND_URL         = process.env.FRONTEND_URL || "http://localhost:3001";
 
-// Store pending auth states: state -> { code_challenge, redirect_uri }
 const pendingStates = new Map();
 
-// GET /auth/github
 router.get("/github", (req, res) => {
   const { code_challenge, code_challenge_method, redirect_uri } = req.query;
-
   const state = crypto.randomBytes(16).toString("hex");
-
   pendingStates.set(state, {
-    code_challenge:        code_challenge        || null,
+    code_challenge: code_challenge || null,
     code_challenge_method: code_challenge_method || "S256",
-    redirect_uri:          redirect_uri          || null,
-    created_at:            Date.now(),
+    redirect_uri: redirect_uri || null,
+    created_at: Date.now(),
   });
-
   setTimeout(() => pendingStates.delete(state), 10 * 60 * 1000);
-
-  const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    scope:     "read:user user:email",
-    state,
-  });
-
-  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+  const params = new URLSearchParams({ client_id: GITHUB_CLIENT_ID, scope: "read:user user:email", state });
+  res.redirect("https://github.com/login/oauth/authorize?" + params);
 });
 
-// GET /auth/github/callback
-router.get("/github/callback", async (req, res) => {
-  const { code, state, code_verifier } = req.query;
-
-  if (!code) {
-    return res.status(400).json({ status: "error", message: "Missing authorization code" });
-  }
-
-  if (!state) {
-    return res.status(400).json({ status: "error", message: "Missing state parameter" });
-  }
-
+router.post("/github/token", async (req, res) => {
+  const { code, code_verifier, state } = req.body;
+  if (!code) return res.status(400).json({ status: "error", message: "Missing authorization code" });
+  if (!state) return res.status(400).json({ status: "error", message: "Missing state parameter" });
   const stateData = pendingStates.get(state);
-  if (!stateData) {
-    return res.status(400).json({ status: "error", message: "Invalid or expired state" });
-  }
+  if (!stateData) return res.status(400).json({ status: "error", message: "Invalid or expired state" });
   pendingStates.delete(state);
-
-  // Validate PKCE only if code_challenge was stored
-  if (stateData.code_challenge && code_verifier) {
+  if (stateData.code_challenge) {
+    if (!code_verifier) return res.status(400).json({ status: "error", message: "Missing code_verifier" });
     const method = stateData.code_challenge_method || "S256";
-    let computed;
-    if (method === "S256") {
-      computed = crypto.createHash("sha256").update(code_verifier).digest("base64url");
-    } else {
-      computed = code_verifier;
-    }
-    if (computed !== stateData.code_challenge) {
-      return res.status(400).json({ status: "error", message: "Invalid code_verifier" });
-    }
+    const computed = method === "S256"
+      ? crypto.createHash("sha256").update(code_verifier).digest("base64url")
+      : code_verifier;
+    if (computed !== stateData.code_challenge) return res.status(400).json({ status: "error", message: "Invalid code_verifier" });
   }
+  try {
+    const githubToken = await exchangeCodeForToken(code);
+    if (!githubToken) return res.status(502).json({ status: "error", message: "Failed to exchange code with GitHub" });
+    const githubUser = await getGithubUser(githubToken);
+    if (!githubUser || !githubUser.id) return res.status(502).json({ status: "error", message: "Failed to fetch GitHub user" });
+    const user = await upsertUser(githubUser);
+    if (!user.is_active) return res.status(403).json({ status: "error", message: "Account is disabled" });
+    const accessToken  = issueAccessToken(user);
+    const refreshToken = issueRefreshToken(user.id);
+    return res.status(200).json({ status: "success", access_token: accessToken, refresh_token: refreshToken, username: user.username, role: user.role });
+  } catch (err) {
+    console.error("Token exchange error:", err);
+    return res.status(500).json({ status: "error", message: "Authentication failed" });
+  }
+});
 
+router.get("/github/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code) return res.status(400).json({ status: "error", message: "Missing authorization code" });
+  if (!state) return res.status(400).json({ status: "error", message: "Missing state parameter" });
+  const stateData = pendingStates.get(state);
+  if (!stateData) return res.status(400).json({ status: "error", message: "Invalid or expired state" });
+  pendingStates.delete(state);
   const redirectUri = stateData.redirect_uri;
-
   try {
     const githubToken = await exchangeCodeForToken(code);
     if (!githubToken) {
-      if (redirectUri) return res.redirect(`${redirectUri}?error=github_exchange_failed`);
+      if (redirectUri) return res.redirect(redirectUri + "?error=github_exchange_failed");
       return res.status(502).json({ status: "error", message: "Failed to exchange code with GitHub" });
     }
-
     const githubUser = await getGithubUser(githubToken);
     if (!githubUser || !githubUser.id) {
-      if (redirectUri) return res.redirect(`${redirectUri}?error=github_user_failed`);
+      if (redirectUri) return res.redirect(redirectUri + "?error=github_user_failed");
       return res.status(502).json({ status: "error", message: "Failed to fetch GitHub user" });
     }
-
-    const db  = getDb();
-    const now = new Date().toISOString();
-    let user  = db.prepare("SELECT * FROM users WHERE github_id = ?").get(String(githubUser.id));
-
-    if (user) {
-      db.prepare("UPDATE users SET username = ?, email = ?, avatar_url = ?, last_login_at = ? WHERE id = ?")
-        .run(githubUser.login, githubUser.email || null, githubUser.avatar_url, now, user.id);
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
-    } else {
-      const id       = uuidv7();
-      const anyAdmin = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
-      const role     = anyAdmin ? "analyst" : "admin";
-      db.prepare(`INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`)
-        .run(id, String(githubUser.id), githubUser.login, githubUser.email || null, githubUser.avatar_url, role, now, now);
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
-    }
-
+    const user = await upsertUser(githubUser);
     if (!user.is_active) {
-      if (redirectUri) return res.redirect(`${redirectUri}?error=account_disabled`);
+      if (redirectUri) return res.redirect(redirectUri + "?error=account_disabled");
       return res.status(403).json({ status: "error", message: "Account is disabled" });
     }
-
     const accessToken  = issueAccessToken(user);
     const refreshToken = issueRefreshToken(user.id);
-
-    if (redirectUri && redirectUri.includes("localhost")) {
-      const params = new URLSearchParams({
-        access_token:  accessToken,
-        refresh_token: refreshToken,
-        username:      user.username,
-      });
-      return res.redirect(`${redirectUri}?${params}`);
-    }
-
     if (redirectUri) {
-      const params = new URLSearchParams({
-        access_token:  accessToken,
-        refresh_token: refreshToken,
-      });
-      return res.redirect(`${redirectUri}?${params}`);
+      const params = new URLSearchParams({ access_token: accessToken, refresh_token: refreshToken });
+      return res.redirect(redirectUri + "?" + params);
     }
-
     const csrfToken = generateCsrfToken();
-    const isProd    = process.env.NODE_ENV === "production";
+    const isProd = process.env.NODE_ENV === "production";
     res.cookie("access_token",  accessToken,  { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 3 * 60 * 1000 });
     res.cookie("refresh_token", refreshToken, { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
     res.cookie("csrf_token",    csrfToken,    { httpOnly: false, secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
-    return res.redirect(`${FRONTEND_URL}/dashboard`);
-
+    return res.redirect(FRONTEND_URL + "/dashboard");
   } catch (err) {
     console.error("OAuth callback error:", err);
-    if (redirectUri) return res.redirect(`${redirectUri}?error=auth_failed`);
+    if (redirectUri) return res.redirect(redirectUri + "?error=auth_failed");
     return res.status(500).json({ status: "error", message: "Authentication failed" });
   }
 });
@@ -146,20 +105,16 @@ router.get("/github/callback", async (req, res) => {
 router.post("/refresh", (req, res) => {
   const token = req.body.refresh_token || (req.cookies && req.cookies.refresh_token);
   if (!token) return res.status(400).json({ status: "error", message: "Refresh token required" });
-
   const result = rotateRefreshToken(token);
   if (!result) return res.status(401).json({ status: "error", message: "Invalid or expired refresh token" });
-
   const { accessToken, refreshToken } = result;
-
   if (req.cookies && req.cookies.refresh_token) {
-    const isProd    = process.env.NODE_ENV === "production";
+    const isProd = process.env.NODE_ENV === "production";
     const csrfToken = generateCsrfToken();
     res.cookie("access_token",  accessToken,  { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 3 * 60 * 1000 });
     res.cookie("refresh_token", refreshToken, { httpOnly: true,  secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
     res.cookie("csrf_token",    csrfToken,    { httpOnly: false, secure: isProd, sameSite: "lax", maxAge: 5 * 60 * 1000 });
   }
-
   return res.status(200).json({ status: "success", access_token: accessToken, refresh_token: refreshToken });
 });
 
@@ -179,13 +134,28 @@ router.get("/me", requireAuth, (req, res) => {
 
 router.post("/setup-admin", (req, res) => {
   const { secret, username } = req.body;
-  if (secret !== process.env.JWT_SECRET) {
-    return res.status(403).json({ status: "error", message: "Forbidden" });
-  }
+  if (secret !== process.env.JWT_SECRET) return res.status(403).json({ status: "error", message: "Forbidden" });
   const db = getDb();
   db.prepare("UPDATE users SET role = 'admin' WHERE username = ?").run(username);
-  return res.status(200).json({ status: "success", message: `${username} is now admin` });
+  return res.status(200).json({ status: "success", message: username + " is now admin" });
 });
+
+async function upsertUser(githubUser) {
+  const db  = getDb();
+  const now = new Date().toISOString();
+  let user  = db.prepare("SELECT * FROM users WHERE github_id = ?").get(String(githubUser.id));
+  if (user) {
+    db.prepare("UPDATE users SET username = ?, email = ?, avatar_url = ?, last_login_at = ? WHERE id = ?")
+      .run(githubUser.login, githubUser.email || null, githubUser.avatar_url, now, user.id);
+    return db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+  }
+  const id       = uuidv7();
+  const anyAdmin = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
+  const role     = anyAdmin ? "analyst" : "admin";
+  db.prepare("INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)")
+    .run(id, String(githubUser.id), githubUser.login, githubUser.email || null, githubUser.avatar_url, role, now, now);
+  return db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+}
 
 function httpsPost(options, body) {
   return new Promise((resolve, reject) => {
@@ -202,9 +172,7 @@ function httpsPost(options, body) {
 
 function httpsGet(url, token) {
   return new Promise((resolve, reject) => {
-    https.get(url, {
-      headers: { Authorization: `Bearer ${token}`, "User-Agent": "insighta-labs" },
-    }, (res) => {
+    https.get(url, { headers: { Authorization: "Bearer " + token, "User-Agent": "insighta-labs" } }, (res) => {
       let data = "";
       res.on("data", (c) => (data += c));
       res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
@@ -213,20 +181,10 @@ function httpsGet(url, token) {
 }
 
 async function exchangeCodeForToken(code) {
-  const body = JSON.stringify({
-    client_id:     GITHUB_CLIENT_ID,
-    client_secret: GITHUB_CLIENT_SECRET,
-    code,
-  });
+  const body = JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code });
   const data = await httpsPost({
-    hostname: "github.com",
-    path:     "/login/oauth/access_token",
-    method:   "POST",
-    headers:  {
-      "Content-Type":   "application/json",
-      Accept:           "application/json",
-      "Content-Length": Buffer.byteLength(body),
-    },
+    hostname: "github.com", path: "/login/oauth/access_token", method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json", "Content-Length": Buffer.byteLength(body) },
   }, body);
   return data.access_token || null;
 }
