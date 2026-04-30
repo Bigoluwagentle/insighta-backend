@@ -189,8 +189,8 @@ router.post("/logout", requireAuth, (req, res) => {
 
 // GET /auth/me
 router.get("/me", requireAuth, (req, res) => {
-  const { id, username, email, avatar_url, role, created_at, last_login_at } = req.user;
-  return res.status(200).json({ status: "success", data: { id, username, email, avatar_url, role, created_at, last_login_at } });
+  const { id, github_id, username, email, avatar_url, role, is_active, created_at, last_login_at } = req.user;
+  return res.status(200).json({ status: "success", data: { id, github_id, username, email, avatar_url, role, is_active, created_at, last_login_at } });
 });
 
 // POST /auth/setup-admin

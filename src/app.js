@@ -24,6 +24,7 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(requestLogger);
 
+// Strict rate limiter for auth routes
 const authRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
@@ -31,8 +32,9 @@ const authRateLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   skipFailedRequests: false,
-  skip: () => false,
-  keyGenerator: (req) => req.ip || req.connection.remoteAddress,
+  keyGenerator: (req) => {
+    return req.headers["x-forwarded-for"] || req.ip || "unknown";
+  },
   handler: (req, res) => {
     return res.status(429).json({ status: "error", message: "Too many requests, please try again later" });
   },
@@ -42,8 +44,8 @@ app.use("/auth", authRateLimiter);
 app.use("/auth", authRoutes);
 
 app.get("/api/users/me", requireAuth, (req, res) => {
-  const { id, username, email, avatar_url, role, created_at, last_login_at } = req.user;
-  return res.status(200).json({ status: "success", data: { id, username, email, avatar_url, role, created_at, last_login_at } });
+  const { id, github_id, username, email, avatar_url, role, is_active, created_at, last_login_at } = req.user;
+  return res.status(200).json({ status: "success", data: { id, github_id, username, email, avatar_url, role, is_active, created_at, last_login_at } });
 });
 
 app.use(csrfProtection);

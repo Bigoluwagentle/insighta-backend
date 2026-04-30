@@ -31,18 +31,33 @@ function issueRefreshToken(userId) {
 
 function rotateRefreshToken(oldToken) {
   const db = getDb();
+
+  // First try database lookup (random string tokens)
   const row = db.prepare("SELECT * FROM refresh_tokens WHERE token = ?").get(oldToken);
-  if (!row) return null;
-  if (new Date(row.expires_at) < new Date()) {
+  if (row) {
+    if (new Date(row.expires_at) < new Date()) {
+      db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(oldToken);
+      return null;
+    }
     db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(oldToken);
+    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(row.user_id);
+    if (!user || !user.is_active) return null;
+    const accessToken  = issueAccessToken(user);
+    const refreshToken = issueRefreshToken(user.id);
+    return { accessToken, refreshToken, user };
+  }
+
+  // Try JWT refresh token (for test tokens issued by /auth/test-tokens)
+  try {
+    const payload = jwt.verify(oldToken, ACCESS_SECRET);
+    const user    = db.prepare("SELECT * FROM users WHERE id = ?").get(payload.sub);
+    if (!user || !user.is_active) return null;
+    const accessToken  = issueAccessToken(user);
+    const refreshToken = issueRefreshToken(user.id);
+    return { accessToken, refreshToken, user };
+  } catch {
     return null;
   }
-  db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(oldToken);
-  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(row.user_id);
-  if (!user || !user.is_active) return null;
-  const accessToken  = issueAccessToken(user);
-  const refreshToken = issueRefreshToken(user.id);
-  return { accessToken, refreshToken, user };
 }
 
 function revokeRefreshToken(token) {
