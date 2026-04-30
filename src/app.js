@@ -24,7 +24,6 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(requestLogger);
 
-// Strict rate limiter for auth routes
 const authRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
